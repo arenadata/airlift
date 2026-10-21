@@ -20,7 +20,9 @@ import io.airlift.spi.secrets.SecretProvider;
 import io.airlift.spi.secrets.SecretProviderFactory;
 
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.configuration.ConfigBinder.configBinder;
 
 public class KeystoreSecretProviderFactory
@@ -43,9 +45,34 @@ public class KeystoreSecretProviderFactory
 
         Injector injector = app
                 .doNotInitializeLogging()
+                .withShutdownHook(false)
                 .setRequiredConfigurationProperties(config)
                 .initialize();
 
-        return injector.getInstance(SecretProvider.class);
+        SecretProvider provider = injector.getInstance(SecretProvider.class);
+        return new SecretProvider()
+        {
+            private final AtomicBoolean closed = new AtomicBoolean();
+
+            @Override
+            public String resolveSecretValue(String key)
+            {
+                checkState(!closed.get(), "Keystore secrets provider is closed");
+                return provider.resolveSecretValue(key);
+            }
+
+            @Override
+            public void close()
+            {
+                if (closed.compareAndSet(false, true)) {
+                    try {
+                        app.close();
+                    }
+                    catch (RuntimeException ignored) {
+                        throw new IllegalStateException("Unable to close keystore secrets provider");
+                    }
+                }
+            }
+        };
     }
 }

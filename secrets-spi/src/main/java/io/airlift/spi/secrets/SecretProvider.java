@@ -14,6 +14,7 @@
 package io.airlift.spi.secrets;
 
 public interface SecretProvider
+        extends AutoCloseable
 {
     /**
      * Resolves and returns the secret value for the given key.
@@ -22,4 +23,14 @@ public interface SecretProvider
      * @throws RuntimeException if key cannot be resolved.
      */
     String resolveSecretValue(String key);
+
+    /**
+     * Releases resources owned by this provider. Implementations must be idempotent and
+     * must not include secret values in exceptions raised during cleanup.
+     */
+    @Override
+    default void close()
+            throws Exception
+    {
+    }
 }

@@ -20,12 +20,16 @@ import com.google.common.collect.ImmutableList.Builder;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.inject.Binder;
+import com.google.inject.Binding;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 import com.google.inject.Stage;
+import com.google.inject.spi.Element;
+import com.google.inject.spi.Elements;
 import com.google.inject.spi.Message;
 import io.airlift.configuration.ConfigPropertyMetadata;
+import io.airlift.configuration.ConfigurationAwareModule;
 import io.airlift.configuration.ConfigurationFactory;
 import io.airlift.configuration.ConfigurationInspector;
 import io.airlift.configuration.ConfigurationInspector.ConfigAttribute;
@@ -45,14 +49,15 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static io.airlift.bootstrap.ClosingBinder.closingBinder;
 import static io.airlift.bootstrap.FuzzyMatcher.findSimilar;
 import static io.airlift.configuration.ConfigurationLoader.getSystemProperties;
 import static io.airlift.configuration.ConfigurationLoader.loadPropertiesFrom;
@@ -73,19 +78,24 @@ import static java.util.Objects.requireNonNull;
  * </ul>
  */
 public class Bootstrap
+        implements AutoCloseable
 {
     private final String name;
     private final Logger log;
 
     private enum State
     {
-        UNINITIALIZED, CONFIGURED, INITIALIZED
+        UNINITIALIZED, CONFIGURED, INITIALIZED, CLOSED
     }
 
     private final List<Module> modules;
+    private Module configuredModules;
 
     private Map<String, String> requiredConfigurationProperties;
     private Map<String, String> optionalConfigurationProperties;
+    private final Set<String> requiredRawProperties = new HashSet<>();
+    private final Set<String> optionalRawProperties = new HashSet<>();
+    private boolean shutdownHook = true;
     private boolean initializeLogging = true;
     private boolean envInterpolation = true;
     private boolean useSystemProperties = true;
@@ -96,6 +106,7 @@ public class Bootstrap
     private State state = State.UNINITIALIZED;
     private ConfigurationFactory configurationFactory;
     private SecretsResolver secretsResolver;
+    private LifeCycleManager lifeCycleManager;
 
     public Bootstrap(String name, Module... modules)
     {
@@ -119,39 +130,89 @@ public class Bootstrap
         this.log = Logger.get(name);
     }
 
+    /** Supplies a literal value, without secret or environment interpolation. */
     public Bootstrap setRequiredConfigurationProperty(String key, String value)
     {
-        if (this.requiredConfigurationProperties == null) {
-            this.requiredConfigurationProperties = new TreeMap<>();
-        }
-        this.requiredConfigurationProperties.put(key, value);
-        return this;
+        return setRequiredConfigurationProperties(Map.of(key, value));
     }
 
-    public Bootstrap setRequiredConfigurationProperties(Map<String, String> requiredConfigurationProperties)
+    /** Supplies literal values, without secret or environment interpolation. */
+    public Bootstrap setRequiredConfigurationProperties(Map<String, String> properties)
     {
-        if (this.requiredConfigurationProperties == null) {
-            this.requiredConfigurationProperties = new TreeMap<>();
+        return setRequiredProperties(properties, false);
+    }
+
+    public Bootstrap setRequiredRawConfigurationProperty(String key, String value)
+    {
+        return setRequiredRawConfigurationProperties(Map.of(key, value));
+    }
+
+    /** Supplies raw values whose surviving references will be resolved once. */
+    public Bootstrap setRequiredRawConfigurationProperties(Map<String, String> properties)
+    {
+        return setRequiredProperties(properties, true);
+    }
+
+    private Bootstrap setRequiredProperties(Map<String, String> properties, boolean raw)
+    {
+        checkState(state == State.UNINITIALIZED, "Already configured");
+        if (requiredConfigurationProperties == null) {
+            requiredConfigurationProperties = new TreeMap<>();
         }
-        this.requiredConfigurationProperties.putAll(requiredConfigurationProperties);
+        requiredConfigurationProperties.putAll(properties);
+        updateRawProperties(requiredRawProperties, properties.keySet(), raw);
         return this;
     }
 
+    /** Supplies a literal value, without secret or environment interpolation. */
     public Bootstrap setOptionalConfigurationProperty(String key, String value)
     {
-        if (this.optionalConfigurationProperties == null) {
-            this.optionalConfigurationProperties = new TreeMap<>();
+        return setOptionalConfigurationProperties(Map.of(key, value));
+    }
+
+    /** Supplies literal values, without secret or environment interpolation. */
+    public Bootstrap setOptionalConfigurationProperties(Map<String, String> properties)
+    {
+        return setOptionalProperties(properties, false);
+    }
+
+    public Bootstrap setOptionalRawConfigurationProperty(String key, String value)
+    {
+        return setOptionalRawConfigurationProperties(Map.of(key, value));
+    }
+
+    /** Supplies raw values whose surviving references will be resolved once. */
+    public Bootstrap setOptionalRawConfigurationProperties(Map<String, String> properties)
+    {
+        return setOptionalProperties(properties, true);
+    }
+
+    private Bootstrap setOptionalProperties(Map<String, String> properties, boolean raw)
+    {
+        checkState(state == State.UNINITIALIZED, "Already configured");
+        if (optionalConfigurationProperties == null) {
+            optionalConfigurationProperties = new TreeMap<>();
         }
-        this.optionalConfigurationProperties.put(key, value);
+        optionalConfigurationProperties.putAll(properties);
+        updateRawProperties(optionalRawProperties, properties.keySet(), raw);
         return this;
     }
 
-    public Bootstrap setOptionalConfigurationProperties(Map<String, String> optionalConfigurationProperties)
+    private static void updateRawProperties(Set<String> rawProperties, Set<String> keys, boolean raw)
     {
-        if (this.optionalConfigurationProperties == null) {
-            this.optionalConfigurationProperties = new TreeMap<>();
+        if (raw) {
+            rawProperties.addAll(keys);
         }
-        this.optionalConfigurationProperties.putAll(optionalConfigurationProperties);
+        else {
+            rawProperties.removeAll(keys);
+        }
+    }
+
+    /** Disables the JVM hook for a child runtime whose owner calls close(). */
+    public Bootstrap withShutdownHook(boolean enabled)
+    {
+        checkState(state == State.UNINITIALIZED, "Already configured");
+        shutdownHook = enabled;
         return this;
     }
 
@@ -228,7 +289,18 @@ public class Bootstrap
     {
         checkState(state == State.UNINITIALIZED, "Already configured");
         state = State.CONFIGURED;
+        lifeCycleManager = new LifeCycleManager(name, List.of(), null, shutdownHook);
+        try {
+            return configureInternal();
+        }
+        catch (RuntimeException | Error failure) {
+            closeAfterFailure(failure);
+            throw failure;
+        }
+    }
 
+    private Set<ConfigPropertyMetadata> configureInternal()
+    {
         Logging logging = null;
         if (initializeLogging) {
             logging = Logging.initialize();
@@ -243,6 +315,8 @@ public class Bootstrap
             String secretsConfigFile = System.getProperty("secretsConfig");
             if (secretsConfigFile != null) {
                 SecretsPluginManager secretsPluginManager = new SecretsPluginManager(createTomlConfiguration(new File(secretsConfigFile)));
+                // Registered first, so consumers and their configuration close before providers.
+                lifeCycleManager.addCloseable(secretsPluginManager, secretsPluginManager::close);
                 secretsPluginManager.installPlugins();
                 secretsPluginManager.load();
                 this.secretsResolver = secretsPluginManager.getSecretsResolver();
@@ -250,6 +324,7 @@ public class Bootstrap
         }
 
         Map<String, String> requiredProperties;
+        Set<String> requiredRaw = requiredRawProperties;
         if (requiredConfigurationProperties == null) {
             // initialize configuration
             log.info("Loading configuration");
@@ -264,32 +339,40 @@ public class Bootstrap
                     throw new UncheckedIOException(e);
                 }
             }
+            requiredRaw = requiredProperties.keySet();
         }
         else {
             requiredProperties = requiredConfigurationProperties;
         }
         Map<String, String> unusedProperties = new TreeMap<>(requiredProperties);
 
-        // combine property sources
+        // Preserve the winning source's interpretation, including literal overrides of raw values.
         Map<String, String> properties = new HashMap<>();
+        Set<String> rawProperties = new HashSet<>();
         if (optionalConfigurationProperties != null) {
             properties.putAll(optionalConfigurationProperties);
+            rawProperties.addAll(optionalRawProperties);
         }
         properties.putAll(requiredProperties);
-
+        rawProperties.removeAll(requiredProperties.keySet());
+        rawProperties.addAll(requiredRaw);
         if (useSystemProperties) {
-            properties.putAll(getSystemProperties());
+            Map<String, String> systemProperties = getSystemProperties();
+            properties.putAll(systemProperties);
+            rawProperties.addAll(systemProperties.keySet());
         }
 
-        // replace secrets in property values
+        Map<String, String> rawValues = new HashMap<>();
+        rawProperties.forEach(key -> rawValues.put(key, properties.remove(key)));
         List<Message> errors = new ArrayList<>();
-        properties = ImmutableSortedMap.copyOf(secretsResolver.getResolvedConfiguration(properties, (key, error) -> {
+        properties.putAll(secretsResolver.getResolvedConfiguration(rawValues, (key, error) -> {
             unusedProperties.remove(key);
             errors.add(new Message(error.getMessage()));
         }));
 
         List<Message> warnings = new ArrayList<>();
-        configurationFactory = new ConfigurationFactory(properties, warning -> warnings.add(new Message(warning)));
+        configurationFactory = new ConfigurationFactory(ImmutableSortedMap.copyOf(properties), warning -> warnings.add(new Message(warning)));
+        lifeCycleManager.addInstance(configurationFactory);
 
         Boolean quietConfig = configurationFactory.build(BootstrapConfig.class).isQuiet();
 
@@ -301,7 +384,45 @@ public class Bootstrap
         }
 
         // Register configuration classes defined in the modules
-        errors.addAll(configurationFactory.registerConfigurationClasses(modules));
+        errors.addAll(configurationFactory.registerConfigurationClasses(new ConfigurationAwareModule()
+        {
+            @Override
+            public void setConfigurationFactory(ConfigurationFactory configurationFactory)
+            {
+                modules.stream()
+                        .filter(ConfigurationAwareModule.class::isInstance)
+                        .map(ConfigurationAwareModule.class::cast)
+                        .forEach(module -> module.setConfigurationFactory(configurationFactory));
+            }
+
+            @Override
+            public void configure(Binder binder)
+            {
+                // Record once: configuring a module can allocate explicitly owned resources.
+                // Replay the same elements for the injector instead of allocating them again.
+                AtomicReference<Error> configurationFailure = new AtomicReference<>();
+                List<Element> elements = Elements.getElements(Stage.PRODUCTION, recordingBinder -> {
+                    try {
+                        modules.forEach(recordingBinder::install);
+                    }
+                    catch (Error failure) {
+                        // Guice records RuntimeExceptions but propagates Errors. Retain
+                        // the partial elements so explicitly owned instances are still closed.
+                        configurationFailure.set(failure);
+                    }
+                });
+                ClosingBinder.registerPendingCloseables(elements, lifeCycleManager);
+                if (configurationFailure.get() != null) {
+                    throw configurationFailure.get();
+                }
+                configuredModules = Elements.getModule(elements);
+                // ConfigurationFactory inspects bindings and messages only. Provider
+                // and member lookups must be applied just once, when creating the injector.
+                elements.stream()
+                        .filter(element -> element instanceof Binding<?> || element instanceof Message)
+                        .forEach(element -> element.applyTo(binder));
+            }
+        }));
 
         // Validate configuration classes
         errors.addAll(configurationFactory.validateRegisteredConfigurationProvider());
@@ -347,32 +468,54 @@ public class Bootstrap
     public Injector initialize()
     {
         checkState(state != State.INITIALIZED, "Already initialized");
+        checkState(state != State.CLOSED, "Bootstrap is closed");
         if (state == State.UNINITIALIZED) {
             configure();
         }
         state = State.INITIALIZED;
 
-        // system modules
-        Builder<Module> moduleList = ImmutableList.builder();
-        moduleList.add(new LifeCycleModule(name));
-        moduleList.add(new ConfigurationModule(configurationFactory));
-        moduleList.add(binder -> closingBinder(binder).registerCloseable(configurationFactory));
-        moduleList.add(binder -> binder.bind(WarningsMonitor.class).toInstance(log::warn));
+        try {
+            Builder<Module> moduleList = ImmutableList.builder();
+            moduleList.add(new LifeCycleModule(lifeCycleManager));
+            moduleList.add(new ConfigurationModule(configurationFactory));
+            moduleList.add(binder -> binder.bind(WarningsMonitor.class).toInstance(log::warn));
+            moduleList.add(Binder::disableCircularProxies);
+            moduleList.add(Binder::requireExplicitBindings);
+            moduleList.add(Binder::requireExactBindingAnnotations);
+            moduleList.add(binder -> binder.bind(SecretsResolver.class).toInstance(secretsResolver));
+            moduleList.add(configuredModules);
 
-        // disable broken Guice "features"
-        moduleList.add(Binder::disableCircularProxies);
-        moduleList.add(Binder::requireExplicitBindings);
-        moduleList.add(Binder::requireExactBindingAnnotations);
+            Injector injector = Guice.createInjector(Stage.PRODUCTION, moduleList.build());
+            lifeCycleManager.start();
+            return injector;
+        }
+        catch (RuntimeException | Error failure) {
+            closeAfterFailure(failure);
+            throw failure;
+        }
+    }
 
-        moduleList.add(binder -> binder.bind(SecretsResolver.class).toInstance(secretsResolver));
-        moduleList.addAll(modules);
+    @Override
+    public void close()
+    {
+        if (state == State.CLOSED) {
+            return;
+        }
+        state = State.CLOSED;
+        if (lifeCycleManager != null) {
+            lifeCycleManager.stopWithoutFailureLogging();
+        }
+    }
 
-        // create the injector
-        Injector injector = Guice.createInjector(Stage.PRODUCTION, moduleList.build());
-
-        injector.getInstance(LifeCycleManager.class).start();
-
-        return injector;
+    private void closeAfterFailure(Throwable failure)
+    {
+        try {
+            close();
+        }
+        catch (RuntimeException cleanupFailure) {
+            // Cleanup failures may contain provider credentials. Preserve only a safe summary.
+            failure.addSuppressed(new RuntimeException("Bootstrap cleanup failed"));
+        }
     }
 
     private void logConfiguration(ConfigurationFactory configurationFactory)

@@ -34,7 +34,7 @@ final class TestBootstrapWithSecretsProvider
     void testBootstrapWithDefaultSecretsProvider()
     {
         Bootstrap bootstrap = new Bootstrap(binder -> configBinder(binder).bindConfig(FooConfig.class))
-                .setRequiredConfigurationProperties(ImmutableMap.of("foo.value", "${ENV:TEST_KEY}"));
+                .setRequiredRawConfigurationProperties(ImmutableMap.of("foo.value", "${ENV:TEST_KEY}"));
 
         Injector injector = bootstrap.initialize();
 
@@ -53,7 +53,7 @@ final class TestBootstrapWithSecretsProvider
 
         Bootstrap bootstrap = new Bootstrap(binder -> configBinder(binder).bindConfig(FooConfig.class))
                 .loadSecretsPlugins()
-                .setRequiredConfigurationProperties(ImmutableMap.of("foo.value", "${ENV:TEST_KEY}"));
+                .setRequiredRawConfigurationProperties(ImmutableMap.of("foo.value", "${ENV:TEST_KEY}"));
 
         assertThatThrownBy(() -> bootstrap.initialize())
                 .hasMessageContaining("No secret provider for key 'env'");
@@ -77,7 +77,7 @@ final class TestBootstrapWithSecretsProvider
 
         Bootstrap bootstrap = new Bootstrap(binder -> configBinder(binder).bindConfig(FooConfig.class))
                 .loadSecretsPlugins()
-                .setRequiredConfigurationProperties(ImmutableMap.of("foo.value", "${ENV:TEST_KEY}"));
+                .setRequiredRawConfigurationProperties(ImmutableMap.of("foo.value", "${ENV:TEST_KEY}"));
 
         Injector injector = bootstrap.initialize();
 
@@ -102,7 +102,7 @@ final class TestBootstrapWithSecretsProvider
 
         Bootstrap bootstrap = new Bootstrap(binder -> configBinder(binder).bindConfig(FooConfig.class))
                 .loadSecretsPlugins()
-                .setRequiredConfigurationProperties(ImmutableMap.of("foo.value", "${MULTI:TEST_KEY}"));
+                .setRequiredRawConfigurationProperties(ImmutableMap.of("foo.value", "${MULTI:TEST_KEY}"));
 
         Injector injector = bootstrap.initialize();
 

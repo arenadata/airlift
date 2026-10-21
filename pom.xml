@@ -67,6 +67,7 @@
         <module>sample-server</module>
         <module>secrets-keystore-plugin</module>
         <module>secrets-spi</module>
+        <module>secrets-vault-plugin</module>
         <module>security</module>
         <module>security-jwks</module>
 
@@ -75,6 +76,7 @@
         <module>stats</module>
         <module>testing</module>
         <module>tracing</module>
+        <module>vault</module>
     </modules>
 
     <scm>
@@ -83,6 +85,14 @@
         <tag>424.1-4.5.0-0</tag>
         <url>https://github.com/arenadata/airlift/tree/master</url>
     </scm>
+
+    <distributionManagement>
+        <repository>
+            <id>arenadata</id>
+            <name>GitHub Packages</name>
+            <url>https://maven.pkg.github.com/arenadata/airlift</url>
+        </repository>
+    </distributionManagement>
 
     <properties>
         <!-- TODO: remove when dependency-scope is removed from airbase -->
@@ -106,6 +116,7 @@
         <dep.openapi-generator-maven-plugin.version>7.21.0</dep.openapi-generator-maven-plugin.version>
         <dep.jersey.version>4.0.2</dep.jersey.version>
         <dep.jjwt.version>0.13.0</dep.jjwt.version>
+        <dep.failsafe.version>3.3.2</dep.failsafe.version>
     </properties>
 
     <dependencyManagement>
@@ -116,6 +127,12 @@
                 <version>${dep.jersey.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+
+            <dependency>
+                <groupId>dev.failsafe</groupId>
+                <artifactId>failsafe</artifactId>
+                <version>${dep.failsafe.version}</version>
             </dependency>
 
             <dependency>
@@ -280,6 +297,12 @@
 
             <dependency>
                 <groupId>io.airlift</groupId>
+                <artifactId>secrets-vault-plugin</artifactId>
+                <version>${dep.airlift.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.airlift</groupId>
                 <artifactId>security</artifactId>
                 <version>${dep.airlift.version}</version>
             </dependency>
@@ -306,6 +329,12 @@
                 <groupId>io.airlift</groupId>
                 <artifactId>units</artifactId>
                 <version>1.13</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.airlift</groupId>
+                <artifactId>vault</artifactId>
+                <version>${dep.airlift.version}</version>
             </dependency>
 
             <dependency>
@@ -382,6 +411,13 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <repositories>
+        <repository>
+            <id>arenadata</id>
+            <url>https://maven.pkg.github.com/arenadata/*</url>
+        </repository>
+    </repositories>
 
     <build>
         <pluginManagement>

@@ -238,7 +238,7 @@ public class TestBootstrap
             configBinder(binder).bindConfig(FooConfig.class);
             binder.bind(FooInstance.class).asEagerSingleton();
         })
-                .setOptionalConfigurationProperty("foo.password", "${ENV:FOO_PASSWORD}")
+                .setOptionalRawConfigurationProperty("foo.password", "${ENV:FOO_PASSWORD}")
                 .initialize()
                 .getInstance(FooConfig.class);
 
@@ -250,7 +250,7 @@ public class TestBootstrap
         })
                 .disableEnvInterpolation();
 
-        assertThatThrownBy(bootstrap.setOptionalConfigurationProperty("foo.password", "${env:FOO_PASSWORD}")::initialize)
+        assertThatThrownBy(bootstrap.setOptionalRawConfigurationProperty("foo.password", "${env:FOO_PASSWORD}")::initialize)
                 .isInstanceOf(ApplicationConfigurationException.class)
                 .hasMessageContaining("No secret provider for key 'env'");
 
@@ -260,7 +260,7 @@ public class TestBootstrap
         })
                 .disableEnvInterpolation();
 
-        assertThatThrownBy(otherBootstrap.setOptionalConfigurationProperty("foo.password", "${Env:FOO_PASSWORD}")::initialize)
+        assertThatThrownBy(otherBootstrap.setOptionalRawConfigurationProperty("foo.password", "${Env:FOO_PASSWORD}")::initialize)
                 .isInstanceOf(ApplicationConfigurationException.class)
                 .hasMessageContaining("No secret provider for key 'env'");
     }

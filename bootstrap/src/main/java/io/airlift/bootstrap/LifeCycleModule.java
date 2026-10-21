@@ -24,25 +24,18 @@ import com.google.inject.spi.ProvisionListener.ProvisionInvocation;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.inject.matcher.Matchers.any;
 import static java.util.Objects.requireNonNull;
 import static org.weakref.jmx.guice.ExportBinder.newExporter;
 
-/**
- * Guice module for binding the LifeCycle manager
- */
+/** Guice module for binding the lifecycle manager. */
 public class LifeCycleModule
         implements Module
 {
-    private final String name;
-    private final List<Object> injectedInstances = new ArrayList<>();
+    private final LifeCycleManager lifeCycleManager;
     private final LifeCycleMethodsMap lifeCycleMethodsMap = new LifeCycleMethodsMap();
-    private final AtomicReference<LifeCycleManager> lifeCycleManager = new AtomicReference<>(null);
 
     @VisibleForTesting
     LifeCycleModule()
@@ -52,51 +45,39 @@ public class LifeCycleModule
 
     public LifeCycleModule(String name)
     {
-        this.name = requireNonNull(name, "name is null");
+        this(new LifeCycleManager(name, List.of(), null));
+    }
+
+    LifeCycleModule(LifeCycleManager lifeCycleManager)
+    {
+        this.lifeCycleManager = requireNonNull(lifeCycleManager, "lifeCycleManager is null");
     }
 
     @Override
     public void configure(Binder binder)
     {
         binder.bindListener(any(), this::provision);
-
         newExporter(binder).export(LifeCycleManager.class).withGeneratedName();
     }
 
     private <T> void provision(ProvisionInvocation<T> provision)
     {
-        Object obj = provision.provision();
-        if ((obj == null) || !isLifeCycleClass(obj.getClass())) {
-            return;
+        Object instance = provision.provision();
+        if (instance != null && isLifeCycleClass(instance.getClass())) {
+            lifeCycleManager.addInstance(instance);
         }
-
-        LifeCycleManager manager = lifeCycleManager.get();
-        if (manager != null) {
-            try {
-                manager.addInstance(obj);
-            }
-            catch (Exception e) {
-                throwIfUnchecked(e);
-                throw new RuntimeException(e);
-            }
-        }
-        else {
-            injectedInstances.add(obj);
-        }
-    }
-
-    @Provides
-    @Singleton
-    public LifeCycleManager getLifeCycleManager()
-    {
-        LifeCycleManager lifeCycleManager = new LifeCycleManager(name, injectedInstances, lifeCycleMethodsMap);
-        this.lifeCycleManager.set(lifeCycleManager);
-        return lifeCycleManager;
     }
 
     private boolean isLifeCycleClass(Class<?> clazz)
     {
         LifeCycleMethods methods = lifeCycleMethodsMap.get(clazz);
         return methods.hasFor(PostConstruct.class) || methods.hasFor(PreDestroy.class);
+    }
+
+    @Provides
+    @Singleton
+    public LifeCycleManager getLifeCycleManager()
+    {
+        return lifeCycleManager;
     }
 }

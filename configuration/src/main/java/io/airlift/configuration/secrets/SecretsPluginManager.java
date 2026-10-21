@@ -31,11 +31,13 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -51,6 +53,7 @@ import static java.util.Arrays.asList;
 import static java.util.Objects.requireNonNull;
 
 public final class SecretsPluginManager
+        implements AutoCloseable
 {
     private static final ImmutableList<String> SPI_PACKAGES = ImmutableList.<String>builder()
             .add("io.airlift.spi.secrets")
@@ -66,27 +69,44 @@ public final class SecretsPluginManager
     private final AtomicReference<Map<String, SecretProvider>> secretsProviders = new AtomicReference<>(ImmutableMap.of());
     private final File installedSecretPluginsDir;
     private final TomlConfiguration tomlConfiguration;
+    private final List<SecretProvider> managedProviders = new ArrayList<>();
+    private final List<SecretsPluginClassLoader> pluginClassLoaders = new ArrayList<>();
+    private boolean pluginsInstalled;
+    private boolean loadStarted;
+    private boolean closed;
 
     public SecretsPluginManager(TomlConfiguration tomlConfiguration)
     {
         this.tomlConfiguration = requireNonNull(tomlConfiguration, "tomlConfiguration is null");
-        ConfigurationFactory configurationFactory = new ConfigurationFactory(tomlConfiguration.getParentConfiguration());
-        SecretsPluginConfig config = configurationFactory.build(SecretsPluginConfig.class);
-        this.installedSecretPluginsDir = config.getSecretsPluginsDir();
+        try (ConfigurationFactory configurationFactory = new ConfigurationFactory(tomlConfiguration.getParentConfiguration())) {
+            SecretsPluginConfig config = configurationFactory.build(SecretsPluginConfig.class);
+            this.installedSecretPluginsDir = config.getSecretsPluginsDir();
+        }
     }
 
-    public void installPlugins()
+    public synchronized void installPlugins()
     {
-        installSecretsPlugin(new EnvironmentVariableSecretsPlugin());
+        checkState(!closed, "Secrets plugin manager is closed");
+        checkState(!pluginsInstalled && !loadStarted, "Secrets plugins already installed or loaded");
+        pluginsInstalled = true;
+        try {
+            installSecretsPlugin(new EnvironmentVariableSecretsPlugin());
 
-        listFiles(installedSecretPluginsDir).stream()
-                .filter(File::isDirectory)
-                .forEach(file -> loadConfigurationResolvers(file.getAbsolutePath(), () -> createClassLoader(file.getName(), buildClassPath(file))));
+            listFiles(installedSecretPluginsDir).stream()
+                    .filter(File::isDirectory)
+                    .forEach(file -> loadConfigurationResolvers(file.getAbsolutePath(), () -> createClassLoader(file.getName(), buildClassPath(file))));
+        }
+        catch (RuntimeException | Error failure) {
+            closeAfterFailure();
+            throw failure;
+        }
     }
 
     @VisibleForTesting
-    void installSecretsPlugin(SecretsPlugin secretsPlugin)
+    synchronized void installSecretsPlugin(SecretsPlugin secretsPlugin)
     {
+        checkState(!closed, "Secrets plugin manager is closed");
+        checkState(!loadStarted, "Secrets providers already loaded");
         secretsPlugin.getSecretProviderFactories()
                 .forEach(this::addSecretProviderFactory);
     }
@@ -99,30 +119,46 @@ public final class SecretsPluginManager
                 secretProviderFactory);
     }
 
-    public void load()
+    public synchronized void load()
     {
+        checkState(!closed, "Secrets plugin manager is closed");
+        checkState(!loadStarted, "Secrets providers already loaded");
+        loadStarted = true;
         ImmutableMap.Builder<String, SecretProvider> builder = ImmutableMap.builder();
 
-        for (String namespace : tomlConfiguration.getNamespaces()) {
-            Map<String, String> properties = new HashMap<>(tomlConfiguration.getNamespaceConfiguration(namespace));
-            properties = replaceEnvironmentVariables(properties);
-            String name = properties.remove(SECRETS_PROVIDER_NAME_PROPERTY);
-            checkState(!isNullOrEmpty(name), "Configuration resolver configuration '%s' does not contain '%s'", namespace, SECRETS_PROVIDER_NAME_PROPERTY);
-            builder.put(namespace, loadConfigProvider(name, properties));
+        try {
+            for (String namespace : tomlConfiguration.getNamespaces()) {
+                Map<String, String> properties = new HashMap<>(tomlConfiguration.getNamespaceConfiguration(namespace));
+                properties = replaceEnvironmentVariables(properties);
+                String name = properties.remove(SECRETS_PROVIDER_NAME_PROPERTY);
+                checkState(!isNullOrEmpty(name), "Configuration resolver configuration '%s' does not contain '%s'", namespace, SECRETS_PROVIDER_NAME_PROPERTY);
+                SecretProvider provider = loadConfigProvider(name, properties);
+                managedProviders.add(provider);
+                builder.put(namespace, provider);
+            }
+            this.secretsProviders.set(builder.buildOrThrow());
         }
-        this.secretsProviders.set(builder.buildOrThrow());
+        catch (RuntimeException | Error failure) {
+            closeAfterFailure();
+            throw failure;
+        }
     }
 
-    public SecretsResolver getSecretsResolver()
+    public synchronized SecretsResolver getSecretsResolver()
     {
+        checkState(!closed, "Secrets plugin manager is closed");
         return new SecretsResolver(secretsProviders.get());
     }
 
-    private void loadConfigurationResolvers(String plugin, Supplier<SecretsPluginClassLoader> createClassLoader)
+    @VisibleForTesting
+    synchronized void loadConfigurationResolvers(String plugin, Supplier<SecretsPluginClassLoader> createClassLoader)
     {
+        checkState(!closed, "Secrets plugin manager is closed");
+        checkState(!loadStarted, "Secrets providers already loaded");
         log.info("-- Loading plugin %s --", plugin);
 
         SecretsPluginClassLoader pluginClassLoader = createClassLoader.get();
+        pluginClassLoaders.add(pluginClassLoader);
 
         log.debug("Classpath for plugin:");
         for (URL url : pluginClassLoader.getURLs()) {
@@ -131,6 +167,10 @@ public final class SecretsPluginManager
 
         try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(pluginClassLoader)) {
             loadConfigurationPlugin(pluginClassLoader);
+        }
+        catch (RuntimeException | Error failure) {
+            closeAfterFailure();
+            throw failure;
         }
 
         log.info("-- Finished loading plugin %s --", plugin);
@@ -161,7 +201,85 @@ public final class SecretsPluginManager
         }
 
         log.info("-- Loaded secret provider %s --", configProviderName);
-        return secretProvider;
+        return new ClassLoaderSafeSecretProvider(requireNonNull(secretProvider, "secretProvider is null"), factory.getClass().getClassLoader());
+    }
+
+    @Override
+    public synchronized void close()
+    {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        secretsProviders.set(ImmutableMap.of());
+        boolean failed = false;
+        for (SecretProvider provider : managedProviders.reversed()) {
+            try {
+                provider.close();
+            }
+            catch (Throwable ignored) {
+                // Provider failures may contain secret values, including in causes or suppressed exceptions.
+                failed = true;
+            }
+        }
+        managedProviders.clear();
+        secretsProviderFactories.clear();
+        for (SecretsPluginClassLoader classLoader : pluginClassLoaders.reversed()) {
+            try {
+                classLoader.close();
+            }
+            catch (Throwable ignored) {
+                failed = true;
+            }
+        }
+        pluginClassLoaders.clear();
+        if (failed) {
+            throw new IllegalStateException("Unable to close secrets plugins");
+        }
+    }
+
+    private void closeAfterFailure()
+    {
+        try {
+            close();
+        }
+        catch (RuntimeException ignored) {
+            // Preserve the original failure without attaching sensitive cleanup exceptions.
+        }
+    }
+
+    private static final class ClassLoaderSafeSecretProvider
+            implements SecretProvider
+    {
+        private final SecretProvider delegate;
+        private final ClassLoader classLoader;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private ClassLoaderSafeSecretProvider(SecretProvider delegate, ClassLoader classLoader)
+        {
+            this.delegate = delegate;
+            this.classLoader = classLoader;
+        }
+
+        @Override
+        public String resolveSecretValue(String key)
+        {
+            checkState(!closed.get(), "Secret provider is closed");
+            try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+                return delegate.resolveSecretValue(key);
+            }
+        }
+
+        @Override
+        public void close()
+                throws Exception
+        {
+            if (closed.compareAndSet(false, true)) {
+                try (ThreadContextClassLoader ignored = new ThreadContextClassLoader(classLoader)) {
+                    delegate.close();
+                }
+            }
+        }
     }
 
     private static List<URL> buildClassPath(File path)

@@ -24,14 +24,18 @@ import java.io.Closeable;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.base.Preconditions.checkState;
 import static java.lang.String.format;
+import static java.util.Collections.newSetFromMap;
+import static java.util.Collections.synchronizedSet;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -42,6 +46,10 @@ public final class LifeCycleManager
     private final String name;
     private final Logger log;
     private final AtomicReference<State> state = new AtomicReference<>(State.LATENT);
+    private final boolean shutdownHookEnabled;
+    private final Set<Object> ownedCloseables = synchronizedSet(newSetFromMap(new IdentityHashMap<>()));
+    private final Set<Object> pendingCloseableRegistrations = synchronizedSet(newSetFromMap(new IdentityHashMap<>()));
+    private final Queue<PendingCloseable> pendingCloseables = new ConcurrentLinkedQueue<>();
     private final ConcurrentWeakIdentitySet startedInstances = new ConcurrentWeakIdentitySet();
     private final Queue<Object> preDestroyInstances = new ConcurrentLinkedQueue<>();
     private final LifeCycleMethodsMap methodsMap;
@@ -74,6 +82,13 @@ public final class LifeCycleManager
     public LifeCycleManager(String name, List<Object> managedInstances, LifeCycleMethodsMap methodsMap)
             throws LifeCycleStartException
     {
+        this(name, managedInstances, methodsMap, true);
+    }
+
+    public LifeCycleManager(String name, List<Object> managedInstances, LifeCycleMethodsMap methodsMap, boolean shutdownHookEnabled)
+            throws LifeCycleStartException
+    {
+        this.shutdownHookEnabled = shutdownHookEnabled;
         // Lifecycle gets its name from the bootstrap which makes both log to same logger
         this.name = requireNonNull(name, "name is null");
         this.log = Logger.get(name);
@@ -102,23 +117,25 @@ public final class LifeCycleManager
     /**
      * Start the life cycle - all instances will have their {@link PostConstruct} method(s) called
      */
-    public void start()
+    public synchronized void start()
             throws LifeCycleStartException
     {
         if (!state.compareAndSet(State.LATENT, State.STARTING)) {
             throw new LifeCycleStartException("Lifecycle '%s' already starting".formatted(name));
         }
 
-        Thread thread = new Thread(() -> {
-            try {
-                stop();
-            }
-            catch (Exception e) {
-                log.error(e, "Failed while stopping lifecycle");
-            }
-        }, "cleanup");
-        shutdownHook.set(thread);
-        Runtime.getRuntime().addShutdownHook(thread);
+        if (shutdownHookEnabled) {
+            Thread thread = new Thread(() -> {
+                try {
+                    stop();
+                }
+                catch (Exception e) {
+                    log.error(e, "Failed while stopping lifecycle");
+                }
+            }, "cleanup");
+            shutdownHook.set(thread);
+            Runtime.getRuntime().addShutdownHook(thread);
+        }
 
         state.set(State.STARTED);
 
@@ -179,21 +196,35 @@ public final class LifeCycleManager
      */
     private void stop(LifeCycleStopFailureHandler handler)
     {
-        if (!state.compareAndSet(State.STARTED, State.STOPPING)) {
-            return;
-        }
-
-        Thread thread = shutdownHook.getAndSet(null);
-        if (thread != null) {
-            try {
-                Runtime.getRuntime().removeShutdownHook(thread);
+        synchronized (this) {
+            State previous = state.getAndUpdate(current -> switch (current) {
+                case LATENT, STARTING, STARTED -> State.STOPPING;
+                case STOPPING, STOPPED -> current;
+            });
+            if (previous == State.STOPPING || previous == State.STOPPED) {
+                return;
             }
-            catch (IllegalStateException ignored) {
+
+            Thread thread = shutdownHook.getAndSet(null);
+            if (thread != null) {
+                try {
+                    Runtime.getRuntime().removeShutdownHook(thread);
+                }
+                catch (IllegalStateException ignored) {
+                }
             }
         }
 
         log.debug("Lifecycle stopping...", name);
 
+        // Explicit instances whose injection never completed still belong to us.
+        // Close them before the dependencies provisioned during their failed injection,
+        // without running @PostConstruct on an uninitialized instance.
+        for (PendingCloseable pending : new ArrayList<>(pendingCloseables).reversed()) {
+            if (pendingCloseableRegistrations.remove(pending.registration())) {
+                stopInstance(new OwnedCloseable(pending.instance(), pending.closeable()), handler);
+            }
+        }
         for (Object obj : new ArrayList<>(preDestroyInstances).reversed()) {
             stopInstance(obj, handler);
         }
@@ -217,6 +248,64 @@ public final class LifeCycleManager
         State currentState = state.get();
         checkState((currentState != State.STOPPING) && (currentState != State.STOPPED), "Lifecycle '%s' is stopped", name);
         startInstance(instance);
+    }
+
+    void addPendingCloseable(AutoCloseable instance)
+    {
+        addPendingCloseable(instance, instance, instance);
+    }
+
+    void addPendingCloseable(Object registration, Object instance, AutoCloseable closeable)
+    {
+        requireNonNull(registration, "registration is null");
+        requireNonNull(instance, "instance is null");
+        requireNonNull(closeable, "closeable is null");
+        checkState(state.get() != State.STOPPING && state.get() != State.STOPPED, "Lifecycle '%s' is stopped", name);
+        if (pendingCloseableRegistrations.add(registration)) {
+            pendingCloseables.add(new PendingCloseable(registration, instance, closeable));
+        }
+    }
+
+    // Only explicit ownership registrations reach this method. An ordinary injected
+    // AutoCloseable remains caller-owned unless it declares lifecycle annotations.
+    void addCloseable(Object instance, AutoCloseable closeable)
+    {
+        requireNonNull(instance, "instance is null");
+        requireNonNull(closeable, "closeable is null");
+        checkState(state.get() != State.STOPPING && state.get() != State.STOPPED, "Lifecycle '%s' is stopped", name);
+        // Keep pending ownership if annotation inspection itself fails.
+        LifeCycleMethods methods = methodsMap.get(instance.getClass());
+        pendingCloseableRegistrations.remove(instance);
+        // @PreDestroy is the object's lifecycle contract; never also invoke standard close().
+        if (methods.hasFor(PreDestroy.class)) {
+            addInstance(instance);
+        }
+        else {
+            addCloseAction(instance, instance, closeable);
+        }
+    }
+
+    void addCloseAction(Object registration, Object instance, AutoCloseable closeable)
+    {
+        checkState(state.get() != State.STOPPING && state.get() != State.STOPPED, "Lifecycle '%s' is stopped", name);
+        pendingCloseableRegistrations.remove(registration);
+        if (ownedCloseables.add(registration)) {
+            preDestroyInstances.add(new OwnedCloseable(instance, closeable));
+        }
+    }
+
+    private record PendingCloseable(Object registration, Object instance, AutoCloseable closeable) {}
+
+    private record OwnedCloseable(Object instance, AutoCloseable closeable)
+    {
+        @PreDestroy
+        public void destroy()
+                throws Exception
+        {
+            try (ThreadContextClassLoader _ = new ThreadContextClassLoader(instance.getClass().getClassLoader())) {
+                closeable.close();
+            }
+        }
     }
 
     private void stopInstance(Object obj, LifeCycleStopFailureHandler handler)

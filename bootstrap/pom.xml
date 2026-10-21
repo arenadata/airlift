@@ -62,6 +62,11 @@
         </dependency>
 
         <dependency>
+            <groupId>jakarta.inject</groupId>
+            <artifactId>jakarta.inject-api</artifactId>
+        </dependency>
+
+        <dependency>
             <groupId>org.weakref</groupId>
             <artifactId>jmxutils</artifactId>
         </dependency>
@@ -112,6 +117,7 @@
                     <environmentVariables>
                         <TEST_KEY>test_value</TEST_KEY>
                         <FOO_PASSWORD>superSecretPassword</FOO_PASSWORD>
+                        <BOOTSTRAP_LITERAL_SECRET>literal-${ENV:FOO_PASSWORD}</BOOTSTRAP_LITERAL_SECRET>
                     </environmentVariables>
                 </configuration>
             </plugin>
