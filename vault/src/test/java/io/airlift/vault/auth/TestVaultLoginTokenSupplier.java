@@ -931,6 +931,7 @@ public class TestVaultLoginTokenSupplier
             case TOKEN -> throw new AssertionError("a configured token needs no login method");
             case APPROLE -> new AppRoleLoginMethod(http, config);
             case KUBERNETES -> new KubernetesLoginMethod(http, config);
+            case KERBEROS -> new KerberosLoginMethod(http, config);
         };
         LoginVaultTokenSupplier tokenSupplier = new LoginVaultTokenSupplier(loginMethod, http, ticker);
         return new Fixture(processor, tokenSupplier, new VaultClient(new VaultSession(http, tokenSupplier), new VaultDatabaseConfig().setRole("trino-dynamic")));

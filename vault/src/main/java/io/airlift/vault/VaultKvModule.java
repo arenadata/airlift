@@ -19,6 +19,7 @@ import com.google.inject.PrivateBinder;
 import com.google.inject.Provider;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.airlift.http.client.HttpClient;
+import io.airlift.http.client.HttpClientConfig;
 import io.airlift.units.Duration;
 import io.airlift.vault.config.VaultConnectionConfig;
 import io.airlift.vault.config.VaultKvConfig;
@@ -58,11 +59,15 @@ public final class VaultKvModule
                     config.setRequestTimeout(new Duration(10, SECONDS));
                 });
         Provider<HttpClient> httpClient = binder.getProvider(Key.get(HttpClient.class, qualifier));
+        Provider<HttpClientConfig> httpConfig = binder.getProvider(Key.get(HttpClientConfig.class, qualifier));
         PrivateBinder privateBinder = binder.newPrivateBinder();
         // Qualify private keys too: Guice cannot shadow bindings from a database VaultModule
         // installed in the parent injector.
         Key<VaultSession> sessionKey = Key.get(VaultSession.class, qualifier);
-        privateBinder.bind(sessionKey).toProvider(() -> VaultSession.borrowed(httpClient.get(), connectionConfig)).in(SINGLETON);
+        privateBinder.bind(sessionKey).toProvider(() -> {
+            VaultSession.validateKerberosHttpConfig(connectionConfig, httpConfig.get());
+            return VaultSession.borrowed(httpClient.get(), connectionConfig);
+        }).in(SINGLETON);
         Provider<VaultSession> session = privateBinder.getProvider(sessionKey);
         privateBinder.bind(VaultKvClient.class).annotatedWith(qualifier)
                 .toProvider(() -> new VaultKvClient(session.get(), kvConfig)).in(SINGLETON);

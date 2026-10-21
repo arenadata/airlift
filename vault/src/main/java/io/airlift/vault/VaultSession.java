@@ -19,6 +19,7 @@ import io.airlift.http.client.HttpClientConfig;
 import io.airlift.http.client.jetty.JettyHttpClient;
 import io.airlift.vault.auth.AppRoleLoginMethod;
 import io.airlift.vault.auth.FileVaultTokenSupplier;
+import io.airlift.vault.auth.KerberosLoginMethod;
 import io.airlift.vault.auth.KubernetesLoginMethod;
 import io.airlift.vault.auth.LoginVaultTokenSupplier;
 import io.airlift.vault.auth.StaticVaultTokenSupplier;
@@ -34,6 +35,7 @@ import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.airlift.vault.VaultException.Category.REFUSED;
+import static io.airlift.vault.enums.VaultAuthMethod.KERBEROS;
 import static java.util.Objects.requireNonNull;
 
 /**
@@ -64,11 +66,13 @@ public final class VaultSession
     public static VaultSession open(VaultConnectionConfig config, HttpClientConfig httpConfig)
     {
         validate(config);
-        return owned(new JettyHttpClient("vault", requireNonNull(httpConfig, "httpConfig is null")), config);
+        validateKerberosHttpConfig(config, httpConfig);
+        return owned(new JettyHttpClient("vault", httpConfig), config);
     }
 
     /**
      * Creates a session which leaves the caller's HTTP client open when closed.
+     * The caller must enforce certificate and hostname verification for Kerberos authentication.
      */
     public static VaultSession borrowed(HttpClient httpClient, VaultConnectionConfig config)
     {
@@ -77,6 +81,7 @@ public final class VaultSession
 
     /**
      * Takes ownership of HTTP, including closing it if construction fails.
+     * The supplied client must enforce certificate and hostname verification for Kerberos authentication.
      */
     public static VaultSession owned(HttpClient httpClient, VaultConnectionConfig config)
     {
@@ -93,6 +98,7 @@ public final class VaultSession
                 case TOKEN -> configuredToken(config);
                 case APPROLE -> new LoginVaultTokenSupplier(new AppRoleLoginMethod(http, config), http);
                 case KUBERNETES -> new LoginVaultTokenSupplier(new KubernetesLoginMethod(http, config), http);
+                case KERBEROS -> new LoginVaultTokenSupplier(new KerberosLoginMethod(http, config), http);
             };
             return new VaultSession(http, supplier, ownsHttp ? Optional.of(httpClient) : Optional.empty());
         }
@@ -111,6 +117,12 @@ public final class VaultSession
                 .orElseGet(() -> new StaticVaultTokenSupplier(config.getToken().orElseThrow()));
     }
 
+    static void validateKerberosHttpConfig(VaultConnectionConfig config, HttpClientConfig httpConfig)
+    {
+        requireNonNull(httpConfig, "httpConfig is null");
+        checkArgument(config.getAuthMethod() != KERBEROS || httpConfig.isVerifyHostname(), "Vault Kerberos authentication requires HTTPS hostname verification");
+    }
+
     private static void validate(VaultConnectionConfig config)
     {
         requireNonNull(config, "config is null");
@@ -119,6 +131,8 @@ public final class VaultSession
         checkArgument(config.isTokenConfigurationValid() && config.isTokenUnusedByOtherMethods(), "Invalid Vault token configuration");
         checkArgument(config.isAppRoleConfigurationValid(), "Invalid Vault AppRole configuration");
         checkArgument(config.isKubernetesConfigurationValid(), "Invalid Vault Kubernetes configuration");
+        checkArgument(config.isKerberosConfigurationValid(), "Invalid Vault Kerberos configuration");
+        checkArgument(config.isKerberosHttpsValid(), "Vault Kerberos authentication requires HTTPS");
     }
 
     public VaultHttp http()

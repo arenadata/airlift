@@ -59,6 +59,9 @@ public class TestVaultConfig
             "auth.kubernetes.mount",
             "auth.kubernetes.role",
             "auth.kubernetes.service-account-token-file");
+    private static final Set<String> KERBEROS_PROPERTIES = ImmutableSet.of(
+            "auth.kerberos.mount", "auth.kerberos.role", "auth.kerberos.principal",
+            "auth.kerberos.keytab", "auth.kerberos.service-principal");
 
     @Test
     public void testMountsOfAnUnusedAuthMethodAreRejected()
@@ -100,6 +103,11 @@ public class TestVaultConfig
                 .setKubernetesMount("kubernetes")
                 .setKubernetesRole(null)
                 .setKubernetesServiceAccountTokenFile(null)
+                .setKerberosMount("kerberos")
+                .setKerberosRole(null)
+                .setKerberosPrincipal(null)
+                .setKerberosKeytab(null)
+                .setKerberosServicePrincipal(null)
                 .setNamespace(null));
     }
 
@@ -161,6 +169,7 @@ public class TestVaultConfig
                 ImmutableSet.<String>builder()
                         .add("token", "token-file", "auth.approle.secret-id-file")
                         .addAll(KUBERNETES_PROPERTIES)
+                        .addAll(KERBEROS_PROPERTIES)
                         .build());
     }
 
@@ -190,6 +199,7 @@ public class TestVaultConfig
                 ImmutableSet.<String>builder()
                         .add("token", "token-file")
                         .addAll(APPROLE_PROPERTIES)
+                        .addAll(KERBEROS_PROPERTIES)
                         .build());
     }
 
@@ -386,6 +396,7 @@ public class TestVaultConfig
                 .add(properties)
                 .addAll(APPROLE_PROPERTIES)
                 .addAll(KUBERNETES_PROPERTIES)
+                .addAll(KERBEROS_PROPERTIES)
                 .build();
     }
 

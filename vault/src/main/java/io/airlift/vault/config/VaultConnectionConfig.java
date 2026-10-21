@@ -57,6 +57,12 @@ public class VaultConnectionConfig
     private boolean kubernetesMountConfigured;
     private String kubernetesRole;
     private File kubernetesServiceAccountTokenFile;
+    private String kerberosMount = "kerberos";
+    private boolean kerberosMountConfigured;
+    private String kerberosRole;
+    private String kerberosPrincipal;
+    private File kerberosKeytab;
+    private String kerberosServicePrincipal;
     private String namespace;
 
     @NotNull
@@ -80,7 +86,7 @@ public class VaultConnectionConfig
     }
 
     @Config("auth.method")
-    @ConfigDescription("How Trino authenticates to the server: TOKEN, APPROLE or KUBERNETES")
+    @ConfigDescription("How the client authenticates to the server: TOKEN, APPROLE, KUBERNETES or KERBEROS")
     public VaultConnectionConfig setAuthMethod(VaultAuthMethod authMethod)
     {
         this.authMethod = authMethod;
@@ -215,6 +221,72 @@ public class VaultConnectionConfig
         return this;
     }
 
+    public String getKerberosMount()
+    {
+        return kerberosMount;
+    }
+
+    @Config("auth.kerberos.mount")
+    @ConfigDescription("Mount path of the Kerberos auth method")
+    public VaultConnectionConfig setKerberosMount(String kerberosMount)
+    {
+        this.kerberosMount = kerberosMount;
+        this.kerberosMountConfigured = true;
+        return this;
+    }
+
+    public Optional<String> getKerberosRole()
+    {
+        return Optional.ofNullable(kerberosRole);
+    }
+
+    @Config("auth.kerberos.role")
+    @ConfigDescription("Explicit role selected by the Kerberos login")
+    public VaultConnectionConfig setKerberosRole(String kerberosRole)
+    {
+        this.kerberosRole = kerberosRole;
+        return this;
+    }
+
+    public Optional<String> getKerberosPrincipal()
+    {
+        return Optional.ofNullable(kerberosPrincipal);
+    }
+
+    @Config("auth.kerberos.principal")
+    @ConfigDescription("Client principal including realm, read from the keytab at every login")
+    public VaultConnectionConfig setKerberosPrincipal(String kerberosPrincipal)
+    {
+        this.kerberosPrincipal = kerberosPrincipal;
+        return this;
+    }
+
+    public Optional<@FileExists File> getKerberosKeytab()
+    {
+        return Optional.ofNullable(kerberosKeytab);
+    }
+
+    @Config("auth.kerberos.keytab")
+    @ConfigDescription("Readable keytab file; ticket caches and password prompting are never used")
+    public VaultConnectionConfig setKerberosKeytab(File kerberosKeytab)
+    {
+        this.kerberosKeytab = kerberosKeytab;
+        return this;
+    }
+
+    public Optional<String> getKerberosServicePrincipal()
+    {
+        return Optional.ofNullable(kerberosServicePrincipal);
+    }
+
+    @Config("auth.kerberos.service-principal")
+    @ConfigDescription("Explicit server principal, for example HTTP/bao.example.com@EXAMPLE.COM; no DNS canonicalization")
+    public VaultConnectionConfig setKerberosServicePrincipal(String kerberosServicePrincipal)
+    {
+        this.kerberosServicePrincipal = kerberosServicePrincipal;
+        return this;
+    }
+
     public Optional<String> getNamespace()
     {
         return Optional.ofNullable(namespace);
@@ -261,5 +333,26 @@ public class VaultConnectionConfig
             return !kubernetesMountConfigured && getKubernetesRole().isEmpty() && getKubernetesServiceAccountTokenFile().isEmpty();
         }
         return getKubernetesRole().isPresent();
+    }
+
+    @AssertTrue(message = "Kerberos mount, role, principal, readable keytab and service-principal must be valid and configured only when vault.auth.method is KERBEROS")
+    public boolean isKerberosConfigurationValid()
+    {
+        if (authMethod != VaultAuthMethod.KERBEROS) {
+            return !kerberosMountConfigured && kerberosRole == null && kerberosPrincipal == null && kerberosKeytab == null && kerberosServicePrincipal == null;
+        }
+        return kerberosMount != null && kerberosMount.matches("[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*") &&
+                kerberosRole != null && !kerberosRole.isBlank() &&
+                kerberosPrincipal != null && kerberosPrincipal.matches("[^/@\\s]+(?:/[^/@\\s]+)?@[^/@\\s]+") &&
+                kerberosKeytab != null && kerberosKeytab.isFile() && kerberosKeytab.canRead() &&
+                kerberosServicePrincipal != null && kerberosServicePrincipal.matches("[^/@\\s]+/[^/@\\s]+@[^/@\\s]+");
+    }
+
+    @AssertTrue(message = "KERBEROS authentication requires an HTTPS endpoint with a hostname and no user info, query or fragment")
+    public boolean isKerberosHttpsValid()
+    {
+        return authMethod != VaultAuthMethod.KERBEROS ||
+                (endpoint != null && "https".equalsIgnoreCase(endpoint.getScheme()) && endpoint.getHost() != null &&
+                        endpoint.getUserInfo() == null && endpoint.getQuery() == null && endpoint.getFragment() == null);
     }
 }

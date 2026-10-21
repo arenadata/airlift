@@ -42,6 +42,7 @@ import java.util.function.Supplier;
 
 import static com.google.common.net.MediaType.JSON_UTF_8;
 import static io.airlift.http.client.HeaderNames.ACCEPT;
+import static io.airlift.http.client.HeaderNames.AUTHORIZATION;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.HttpUriBuilder.uriBuilderFrom;
 import static io.airlift.http.client.JsonBodyGenerator.jsonBodyGenerator;
@@ -177,6 +178,26 @@ public final class VaultHttp
     public <T> T postCreatingSecret(URI uri, Optional<String> token, Map<String, Object> body, JsonCodec<T> responseCodec, String operation)
     {
         return withoutResponseContent(operation, () -> retry(unservedRequestRetryPolicy, () -> exchange(postRequest(uri, body), token, responseCodec, operation)));
+    }
+
+    /**
+     * Single-leg Kerberos login. The token factory runs inside each permitted retry, since an
+     * AP-REQ must never be replayed. HTTPS authenticates the server; redirects and automatic
+     * challenge negotiation are deliberately not used by this OpenBao protocol.
+     */
+    public <T> T postKerberosLogin(String mount, String role, Supplier<String> negotiateToken, JsonCodec<T> responseCodec, String operation)
+    {
+        return withoutResponseContent(operation, () -> {
+            if (!"https".equalsIgnoreCase(endpoint.getScheme())) {
+                throw new IllegalArgumentException("Kerberos login requires HTTPS");
+            }
+            URI uri = uri("auth", mount, "login");
+            return retry(unservedRequestRetryPolicy, () -> exchange(
+                    postRequest(uri, Map.of("role", role))
+                            .setFollowRedirects(false)
+                            .setHeader(AUTHORIZATION, "Negotiate " + negotiateToken.get()),
+                    Optional.empty(), responseCodec, operation));
+        });
     }
 
     /**

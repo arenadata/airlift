@@ -30,4 +30,8 @@ public enum VaultAuthMethod
      * {@code POST /v1/auth/<mount>/login} with the projected service account token of the pod.
      */
     KUBERNETES,
+    /**
+     * A keytab-based Kerberos client login over verified HTTPS.
+     */
+    KERBEROS,
 }

@@ -43,12 +43,19 @@ returned verbatim, including whitespace and literal `${...}`. KV values are not
 cached. Configuration substitution happens when a component is created; it does
 not update an already-created component after Vault changes.
 
-`TOKEN`, `APPROLE`, and `KUBERNETES` authentication share the
+`TOKEN`, `APPROLE`, `KUBERNETES`, and `KERBEROS` authentication share the
 [client's connection configuration](../vault/README.md). HTTP TLS, mTLS,
 timeouts, and connection settings use the `vault.http-client.` prefix. TOML
 provider properties are expanded for ENV references by `SecretsPluginManager`
 once, before the factory receives them; the provider Bootstrap does not expand
 them again or take system-property overrides.
+
+For keytab authentication, use the `vault.auth.kerberos.*` properties documented
+in the shared client. The keytab and CA must be available to the process before
+the parent application Bootstrap resolves its HTTPS and internal communication
+secrets. This mode performs an isolated JAAS login; it does not reuse a connector's
+Hadoop Subject or a ticket cache. It implements OpenBao's single-leg client
+authentication over verified HTTPS, without claiming Kerberos mutual authentication.
 
 The secrets manager owns each provider. Closing the manager closes each provider
 under its plugin classloader, revokes tokens created by its login, and closes its

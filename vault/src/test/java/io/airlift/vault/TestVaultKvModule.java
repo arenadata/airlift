@@ -26,10 +26,13 @@ import io.airlift.units.Duration;
 import io.airlift.vault.config.VaultDatabaseConfig;
 import io.airlift.vault.http.ForVault;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
 import java.net.InetSocketAddress;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -48,6 +51,27 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TestVaultKvModule
 {
+    @Test
+    void testKerberosRequiresHostnameVerification(@TempDir Path directory)
+            throws Exception
+    {
+        Path keytab = Files.createFile(directory.resolve("client.keytab"));
+        assertThatThrownBy(() -> new Bootstrap(new VaultKvModule("vault", First.class))
+                .doNotInitializeLogging()
+                .quiet()
+                .setRequiredConfigurationProperties(ImmutableMap.<String, String>builder()
+                        .put("vault.endpoint", "https://bao.example:8200")
+                        .put("vault.auth.method", "KERBEROS")
+                        .put("vault.auth.kerberos.role", "trino-config")
+                        .put("vault.auth.kerberos.principal", "trino/node.example@EXAMPLE.COM")
+                        .put("vault.auth.kerberos.keytab", keytab.toString())
+                        .put("vault.auth.kerberos.service-principal", "HTTP/bao.example@EXAMPLE.COM")
+                        .put("vault.http-client.https.hostname-verification", "false")
+                        .buildOrThrow())
+                .initialize())
+                .hasStackTraceContaining("Vault Kerberos authentication requires HTTPS hostname verification");
+    }
+
     @Test
     void testQualifiedClientsCoexistWithDatabaseClient()
             throws Exception

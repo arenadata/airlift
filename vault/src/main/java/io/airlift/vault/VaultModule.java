@@ -16,6 +16,7 @@ package io.airlift.vault;
 import com.google.inject.Binder;
 import io.airlift.configuration.AbstractConfigurationAwareModule;
 import io.airlift.vault.auth.AppRoleLoginMethod;
+import io.airlift.vault.auth.KerberosLoginMethod;
 import io.airlift.vault.auth.KubernetesLoginMethod;
 import io.airlift.vault.auth.LoginVaultTokenSupplier;
 import io.airlift.vault.auth.VaultLoginMethod;
@@ -56,6 +57,7 @@ public class VaultModule
             case TOKEN -> binder.bind(VaultTokenSupplier.class).toInstance(VaultSession.configuredToken(config));
             case APPROLE -> bindLoginMethod(binder, AppRoleLoginMethod.class);
             case KUBERNETES -> bindLoginMethod(binder, KubernetesLoginMethod.class);
+            case KERBEROS -> bindLoginMethod(binder, KerberosLoginMethod.class);
         }
     }
 
