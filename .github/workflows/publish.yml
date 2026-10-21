@@ -1,0 +1,50 @@
+name: Publish Arenadata packages
+
+on:
+  push:
+    tags:
+      - '*'
+
+concurrency:
+  group: airlift-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'arenadata/airlift' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Setup JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+          cache: maven
+          settings-path: ${{ github.workspace }}/.mvn
+          overwrite-settings: false
+      - name: Reject SNAPSHOT version
+        shell: bash
+        run: |
+          ./mvnw -B -ntp -N help:evaluate \
+            -Dexpression=project.version -Doutput="$RUNNER_TEMP/project-version"
+          version="$(cat "$RUNNER_TEMP/project-version")"
+          if [[ "$version" == *-SNAPSHOT ]]; then
+            echo "::error::SNAPSHOT Maven versions cannot be published by this workflow ($version)"
+            exit 1
+          fi
+      - name: Install reactor dependencies
+        run: ./mvnw -B -V -ntp install -DskipTests -Dair.check.skip-all
+      - name: Test and publish to GitHub Packages
+        run: ./mvnw -B -V -ntp clean deploy -P ci -DdeployAtEnd=true

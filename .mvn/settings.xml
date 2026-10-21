@@ -4,6 +4,11 @@
     </pluginGroups>
     <servers>
         <server>
+            <id>arenadata</id>
+            <username>${env.GITHUB_ACTOR}</username>
+            <password>${env.GITHUB_TOKEN}</password>
+        </server>
+        <server>
             <id>sonatype-central-portal</id>
             <username>${env.MAVENCENTRAL_USERNAME}</username>
             <password>${env.MAVENCENTRAL_PASSWORD}</password>
